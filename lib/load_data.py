@@ -7,6 +7,7 @@ from .load_blendedmvs import load_blendedmvs_data
 from .load_tankstemple import load_tankstemple_data
 from .load_deepvoxels import load_dv_data
 from .load_co3d import load_co3d_data
+from .load_waymo import load_waymo_data
 
 
 def load_data(args):
@@ -28,6 +29,35 @@ def load_data(args):
         if args.llffhold > 0:
             print('Auto LLFF holdout,', args.llffhold)
             i_test = np.arange(images.shape[0])[::args.llffhold]
+
+        i_val = i_test
+        i_train = np.array([i for i in np.arange(int(images.shape[0])) if
+                        (i not in i_test and i not in i_val)])
+
+        print('DEFINING BOUNDS')
+        if args.ndc:
+            near = 0.
+            far = 1.
+        else:
+            near = np.ndarray.min(bds) * .9
+            far = np.ndarray.max(bds) * 1.
+        print('NEAR FAR', near, far)
+    
+    elif args.dataset_type == 'waymo':
+        images, depths, poses, bds, render_poses, i_test = load_waymo_data(
+                args.datadir, args.factor,
+                recenter=True, bd_factor=.75,
+                spherify=args.spherify,
+                load_depths=args.load_depths)
+        hwf = poses[0,:3,-1]
+        poses = poses[:,:3,:4]
+        print('Loaded waymo', images.shape, render_poses.shape, hwf, args.datadir)
+        if not isinstance(i_test, list):
+            i_test = [i_test]
+
+        if args.waymohold > 0:
+            print('Auto Waymo holdout,', args.waymohold)
+            i_test = np.arange(images.shape[0])[::args.waymohold]
 
         i_val = i_test
         i_train = np.array([i for i in np.arange(int(images.shape[0])) if
