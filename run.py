@@ -392,6 +392,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             rgbper = (render_result['raw_rgb'] - target[render_result['ray_id']]).pow(2).sum(-1)
             rgbper_loss = (rgbper * render_result['weights'].detach()).sum() / len(rays_o)
             loss += cfg_train.weight_rgbper * rgbper_loss
+        loss += cfg_train.weight_depth_loss * F.mse_loss(render_result['depth'], rays_gt_depth) ####### DEPTH_LOSS
         loss.backward()
 
         if global_step<cfg_train.tv_before and global_step>cfg_train.tv_after and global_step%cfg_train.tv_every==0:
