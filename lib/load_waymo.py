@@ -1,5 +1,11 @@
 import numpy as np
 import os, imageio
+import tensorflow as tf
+
+from waymo_open_dataset.utils import range_image_utils
+from waymo_open_dataset.utils import transform_utils
+from waymo_open_dataset.utils import  frame_utils
+from waymo_open_dataset import dataset_pb2 as open_dataset
 
 
 ########## Slightly modified version of LLFF data loading code
@@ -81,8 +87,64 @@ def _minify(basedir, factors=[], resolutions=[]):
 
 
 def _load_data(filename, framenum):
-    ;
-    return imgs, poses, pcd, hwf
+    dataset = tf.data.TFRecordDataset(filename, compression_type='')
+    data_iter = dataset.as_numpy_iterator()
+    for i in range(framenum+1):
+        data = next(data_iter)
+        frame = open_dataset.Frame()
+        frame.ParseFromString(bytearray(data.numpy()))
+        break
+
+    (range_images, camera_projections, range_image_top_pose) = frame_utils.parse_range_image_and_camera_projection(frame)
+
+    points, cp_points = frame_utils.convert_range_image_to_point_cloud(
+        frame,
+        range_images,
+        camera_projections,
+        range_image_top_pose)
+    points_all = np.concatenate(points, axis=0)
+    cp_points_all = np.concatenate(cp_points, axis=0)
+
+    # The distance between lidar points and vehicle frame origin.
+    points_all_tensor = tf.norm(points_all, axis=-1, keepdims=True)
+    cp_points_all_tensor = tf.constant(cp_points_all, dtype=tf.int32)
+
+    images = []
+    poses = []
+    hwf = []
+    projected_points_per_image = []
+    # cp_points_all_concat = np.concatenate([cp_points_all, points_all], axis=-1)
+    # cp_points_all_concat_tensor = tf.constant(cp_points_all_concat)
+
+    for i in range(5):
+        if focal is not None:
+            assert focal == frame.context.camera_calibrations[0].intrinsic[0]
+        focal = frame.context.camera_calibrations[0].intrinsic[0]
+        H = frame.context.camera_calibrations[0].height
+        W = frame.context.camera_calibrations[0].width
+        hwf.append([H, W, focal])
+
+        # Frame = Panoramic, Images = A specific view of the frame
+        cam_img = frame.images[i]
+        
+        images.append(tf.image.decode_jpeg(cam_img.image))
+
+        pose = np.array(cam_img.pose.transform)
+        pose = np.reshape(pose, (4, 4))
+        poses.append(pose)
+
+        mask = tf.equal(cp_points_all_tensor[..., 0], cam_img.name)
+
+        cp_points_all_tensor = tf.cast(tf.gather_nd(
+            cp_points_all_tensor, tf.where(mask)), dtype=tf.float32)
+        points_all_tensor = tf.gather_nd(points_all_tensor, tf.where(mask))
+
+        projected_points_all_from_raw_data = tf.concat(
+            [cp_points_all_tensor[..., 1:3], points_all_tensor], axis=-1).numpy()
+
+        projected_points_per_image.append(projected_points_all_from_raw_data)
+
+    return np.array(images), np.array(poses), np.array(projected_points_per_image), np.array(hwf)
 
 def normalize(x):
     return x / np.linalg.norm(x)
@@ -203,81 +265,84 @@ def spherify_poses(poses, bds, depths):
     return poses_reset, new_poses, bds, depths
 
 
-def load_llff_data(filename, framenum=0):
+def load_waymo_data(filename, framenum=0):
 
-    imgs, poses, pcd, hwf = _load_data(filename, framenum) # factor=8 downsamples original imgs by 8x
-    print('Loaded', basedir, bds.min(), bds.max())
-    if load_depths:
-        depths = depths[0]
-    else:
-        depths = 0
+    imgs, poses, points_per_img, hwf = _load_data(filename, framenum)
+    # print('Loaded', basedir, bds.min(), bds.max())
+    # if load_depths:
+    #     depths = depths[0]
+    # else:
+    #     depths = 0
 
-    # Correct rotation matrix ordering and move variable dim to axis 0
-    poses = np.concatenate([poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], 1)
-    poses = np.moveaxis(poses, -1, 0).astype(np.float32)
-    imgs = np.moveaxis(imgs, -1, 0).astype(np.float32)
-    images = imgs
-    bds = np.moveaxis(bds, -1, 0).astype(np.float32)
+    # # Correct rotation matrix ordering and move variable dim to axis 0
+    # poses = np.concatenate([poses[:, 1:2, :], -poses[:, 0:1, :], poses[:, 2:, :]], 1)
+    # poses = np.moveaxis(poses, -1, 0).astype(np.float32)
+    # imgs = np.moveaxis(imgs, -1, 0).astype(np.float32)
+    # images = imgs
+    # bds = np.moveaxis(bds, -1, 0).astype(np.float32)
 
-    # Rescale if bd_factor is provided
-    sc = 1. if bd_factor is None else 1./(bds.min() * bd_factor)
-    poses[:,:3,3] *= sc
-    bds *= sc
-    depths *= sc
+#     # Rescale if bd_factor is provided
+#     sc = 1. if bd_factor is None else 1./(bds.min() * bd_factor)
+#     poses[:,:3,3] *= sc
+#     bds *= sc
+#     depths *= sc
 
-    if recenter:
-        poses = recenter_poses(poses)
+#     if recenter:
+#         poses = recenter_poses(poses)
 
-    if spherify:
-        poses, render_poses, bds, depths = spherify_poses(poses, bds, depths)
+#     if spherify:
+#         poses, render_poses, bds, depths = spherify_poses(poses, bds, depths)
 
-    else:
+#     else:
 
-        c2w = poses_avg(poses)
-        print('recentered', c2w.shape)
-        print(c2w[:3,:4])
+#         c2w = poses_avg(poses)
+#         print('recentered', c2w.shape)
+#         print(c2w[:3,:4])
 
-        ## Get spiral
-        # Get average pose
-        up = normalize(poses[:, :3, 1].sum(0))
+#         ## Get spiral
+#         # Get average pose
+#         up = normalize(poses[:, :3, 1].sum(0))
 
-        # Find a reasonable "focus depth" for this dataset
-        close_depth, inf_depth = bds.min()*.9, bds.max()*5.
-        dt = .75
-        mean_dz = 1./(((1.-dt)/close_depth + dt/inf_depth))
-        focal = mean_dz
+#         # Find a reasonable "focus depth" for this dataset
+#         close_depth, inf_depth = bds.min()*.9, bds.max()*5.
+#         dt = .75
+#         mean_dz = 1./(((1.-dt)/close_depth + dt/inf_depth))
+#         focal = mean_dz
 
-        # Get radii for spiral path
-        shrink_factor = .8
-        zdelta = close_depth * .2
-        tt = poses[:,:3,3] # ptstocam(poses[:3,3,:].T, c2w).T
-        rads = np.percentile(np.abs(tt), 90, 0)
-        c2w_path = c2w
-        N_views = 120
-        N_rots = 2
-        if path_zflat:
-#             zloc = np.percentile(tt, 10, 0)[2]
-            zloc = -close_depth * .1
-            c2w_path[:3,3] = c2w_path[:3,3] + zloc * c2w_path[:3,2]
-            rads[2] = 0.
-            N_rots = 1
-            N_views/=2
+#         # Get radii for spiral path
+#         shrink_factor = .8
+#         zdelta = close_depth * .2
+#         tt = poses[:,:3,3] # ptstocam(poses[:3,3,:].T, c2w).T
+#         rads = np.percentile(np.abs(tt), 90, 0)
+#         c2w_path = c2w
+#         N_views = 120
+#         N_rots = 2
+#         if path_zflat:
+# #             zloc = np.percentile(tt, 10, 0)[2]
+#             zloc = -close_depth * .1
+#             c2w_path[:3,3] = c2w_path[:3,3] + zloc * c2w_path[:3,2]
+#             rads[2] = 0.
+#             N_rots = 1
+#             N_views/=2
 
-        # Generate poses for spiral path
-        render_poses = render_path_spiral(c2w_path, up, rads, focal, zdelta, zrate=.5, rots=N_rots, N=N_views)
+#         # Generate poses for spiral path
+#         render_poses = render_path_spiral(c2w_path, up, rads, focal, zdelta, zrate=.5, rots=N_rots, N=N_views)
 
-    render_poses = np.array(render_poses).astype(np.float32)
+#     render_poses = np.array(render_poses).astype(np.float32)
 
-    c2w = poses_avg(poses)
-    print('Data:')
-    print(poses.shape, images.shape, bds.shape)
+#     c2w = poses_avg(poses)
+#     print('Data:')
+#     print(poses.shape, images.shape, bds.shape)
 
-    dists = np.sum(np.square(c2w[:3,3] - poses[:,:3,3]), -1)
-    i_test = np.argmin(dists)
-    print('HOLDOUT view is', i_test)
+#     dists = np.sum(np.square(c2w[:3,3] - poses[:,:3,3]), -1)
+#     i_test = np.argmin(dists)
+#     print('HOLDOUT view is', i_test)
 
-    images = images.astype(np.float32)
+    images = imgs.astype(np.float32)
     poses = poses.astype(np.float32)
 
-    return images, poses, hwf, i_split
+    near = np.min(points_per_img[:, :, 2])
+    far = np.max(points_per_img[:, :, 2])
+
+    return images, poses, points_per_img, hwf, near, far
 

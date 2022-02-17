@@ -115,6 +115,17 @@ def load_data(args):
             else:
                 images[i] = images[i] * masks[i][...,None]
 
+    elif args.dataset_type == 'waymo':
+        images, poses, points_per_img, hwf, near, far = load_waymo_data(args)
+        print('Loaded waymo', images.shape, poses.shape, points_per_img.shape, hwf, args.datadir, near, far)
+        # i_train, i_val, i_test = i_split
+
+        # if images.shape[-1] == 4:
+        #     if args.white_bkgd:
+        #         images = images[...,:3]*images[...,-1:] + (1.-images[...,-1:])
+        #     else:
+        #         images = images[...,:3]*images[...,-1:]
+
     else:
         raise NotImplementedError(f'Unknown dataset type {args.dataset_type} exiting')
 
